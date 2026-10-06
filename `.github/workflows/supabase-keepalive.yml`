@@ -1,0 +1,69 @@
+name: Supabase Multi-Project Keep Alive
+
+on:
+  schedule:
+    - cron: "17 15 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Consultar todos los proyectos Supabase
+        env:
+          SUPABASE_PROJECTS: ${{ secrets.SUPABASE_PROJECTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${SUPABASE_PROJECTS:-}" ]]; then
+            echo "::error::No existe el secreto SUPABASE_PROJECTS"
+            exit 1
+          fi
+
+          if ! echo "$SUPABASE_PROJECTS" | jq -e 'type == "array" and length > 0' >/dev/null; then
+            echo "::error::SUPABASE_PROJECTS debe ser un arreglo JSON válido y no vacío."
+            exit 1
+          fi
+
+          failures=0
+          total=$(echo "$SUPABASE_PROJECTS" | jq 'length')
+          echo "Proyectos configurados: $total"
+
+          while IFS= read -r project; do
+            name=$(echo "$project" | jq -r '.name // "sin_nombre"')
+            url=$(echo "$project" | jq -r '.url // empty' | sed 's:/*$::')
+            key=$(echo "$project" | jq -r '.anon_key // empty')
+
+            if [[ -z "$url" || -z "$key" ]]; then
+              echo "::error title=$name::Falta url o anon_key"
+              failures=$((failures + 1))
+              continue
+            fi
+
+            echo "Consultando: $name"
+            safe_name="${name//[^A-Za-z0-9_.-]/_}"
+
+            http_code=$(
+              curl                 --silent                 --show-error                 --location                 --max-time 25                 --output "/tmp/${safe_name}.json"                 --write-out "%{http_code}"                 "${url}/rest/v1/system_keepalive?select=id&limit=1"                 -H "apikey: ${key}"                 -H "Authorization: Bearer ${key}"                 -H "Accept: application/json"               || true
+            )
+
+            if [[ "$http_code" =~ ^2 ]]; then
+              echo "OK: $name (HTTP $http_code)"
+            else
+              echo "::error title=$name::Falló la consulta (HTTP ${http_code:-error_curl})"
+              failures=$((failures + 1))
+            fi
+          done < <(echo "$SUPABASE_PROJECTS" | jq -c '.[]')
+
+          if (( failures > 0 )); then
+            echo "::error::$failures proyecto(s) fallaron."
+            exit 1
+          fi
+
+          echo "Todos los proyectos Supabase respondieron correctamente."
